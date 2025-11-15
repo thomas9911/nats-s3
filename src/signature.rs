@@ -207,7 +207,7 @@ pub fn verify_headers(
 
     let signer = builder.build().unwrap();
 
-    let request = dbg!(SignableRequest::new(
+    let request = SignableRequest::new(
         http_method.as_str(),
         full_host,
         header_map
@@ -215,7 +215,7 @@ pub fn verify_headers(
             .filter(|(key, _)| params.signed_headers.contains(&key.as_str()))
             .map(|(key, value)| (key.as_str(), value.to_str().unwrap())),
         payload,
-    ))
+    )
     .expect("host is not valid");
 
     if let Ok(output) = aws_sigv4::http_request::sign(request, &signer.into()) {
@@ -230,7 +230,6 @@ pub fn parse_from_headers<'a>(header_map: &'a HeaderMap) -> Option<S3V4Params<'a
         .get(AUTHORIZATION)
         .and_then(|x| x.to_str().ok())?;
 
-    dbg!("AUTHORIZATION:", authorization);
     parse_authorization_header(authorization, &header_map)
 }
 
@@ -265,8 +264,6 @@ pub fn parse_authorization_header<'a>(
     }
 
     // validations
-
-    dbg!("Parsed params:", &params);
 
     if params.access_key == "" {
         return None;
