@@ -10,15 +10,14 @@ use axum::{
     routing::{get, put},
 };
 use axum_extra::{
-    TypedHeader,
-    extract::Host,
-    headers::{
+    TypedHeader, extract::Host, handler::HandlerCallWithExtractors, headers::{
         Authorization,
         authorization::{Bearer, Credentials},
-    },
+    }
 };
 use clap::Parser;
 use futures_util::{StreamExt, TryStreamExt};
+use tokio_util::io::ReaderStream;
 use std::{borrow::Cow, collections::HashMap};
 use time::format_description::well_known::Rfc3339;
 
@@ -75,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         // .route("/protected/", get(protected_handler))
         .route("/", get(list_buckets))
         .route("/{bucket}/", put(create_bucket))
+        .route("/{bucket}/{*file_path}", get(get_private_object.or(get_public_object)))
         .fallback(fallback)
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
@@ -159,6 +159,9 @@ async fn s3_middleware(
         .status(StatusCode::UNAUTHORIZED)
         .body(Body::from("Unauthorized"))
         .unwrap()
+
+    // implement temp file to fix this
+    // next.run(Request::from_parts(parts, body)).await
 }
 
 async fn fetch_secret_key(
@@ -216,7 +219,6 @@ async fn create_or_get_key_value_store(
 
 async fn put_bucket(nats_client: async_nats::Client, create: BucketRequest) -> anyhow::Result<()> {
     let subject = format_buckets_subject(&create.namespace);
-    dbg!("PUT BUCKET SUBJECT", &subject);
     let (jetstream, store) = create_or_get_key_value_store(nats_client, &subject).await?;
 
     // check if bucket already exists
@@ -244,6 +246,8 @@ async fn list_buckets_from_nats(
     namespace: &str,
 ) -> anyhow::Result<Vec<BucketRequest>> {
     let subject = format_buckets_subject(namespace);
+    // maybe use jetstream domain or prefix instead of manually adding namespace?
+    // https://docs.rs/async-nats/latest/async_nats/jetstream/fn.with_domain.html
     let jetstream = async_nats::jetstream::new(nats_client);
     let store = jetstream.get_key_value(subject).await?;
 
@@ -268,6 +272,7 @@ fn format_namespace(host: &str) -> String {
 }
 
 fn format_auth_subject(namespace: &str) -> String {
+    // maybe use jetstream domain or prefix instead of manually adding namespace?
     format!("s3-auth-{}", namespace)
 }
 
@@ -346,6 +351,116 @@ async fn list_buckets(
    </Owner>  
 </ListAllMyBucketsResult>"#
     )
+}
+
+async fn get_private_object(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthInfo>,
+    Path((bucket, file_path)): Path<(String, String)>,
+) -> axum::response::Response {
+    dbg!(format!(
+        "get object '{}' from bucket '{}'",
+        file_path, bucket
+    ));
+
+    let jetstream = async_nats::jetstream::new(state.nats_client.clone());
+    let object_store = match jetstream
+        .get_object_store(format_bucket_subject(&auth.namespace, &bucket))
+        .await
+    {
+        Ok(store) => store,
+        Err(e) => {
+            dbg!(&e);
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("Bucket not found: {}", e)))
+                .unwrap();
+        }
+    };
+
+    match object_store.get(&file_path).await {
+        Ok(reader) => {
+            // let mut data = Vec::new();
+            // if let Err(e) = reader.read_to_end(&mut data).await {
+            //     dbg!(&e);
+            //     return axum::response::Response::builder()
+            //         .status(StatusCode::INTERNAL_SERVER_ERROR)
+            //         .body(Body::from(format!("Failed to read object: {}", e)))
+            //         .unwrap();
+            // }
+
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .unwrap()
+        }
+        Err(e) => {
+            dbg!(&e);
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("Object not found: {}", e)))
+                .unwrap();
+        }
+    }
+}
+
+async fn get_public_object(
+    State(state): State<AppState>,
+    Host(host): Host,
+    Path((bucket, file_path)): Path<(String, String)>,
+) -> axum::response::Response {
+    let external_host = map_host_to_external(&host, &state.host_mapping);
+    tracing::debug!(
+        "Incoming request mapped to external host: {}",
+        external_host
+    );
+    let namespace = format_namespace(&external_host);
+    tracing::debug!("Incoming request using namespace: {}", namespace);
+
+    dbg!(format!(
+        "get object '{}' from bucket '{}'",
+        file_path, bucket
+    ));
+
+    let jetstream = async_nats::jetstream::new(state.nats_client.clone());
+    let object_store = match jetstream
+        .get_object_store(format_bucket_subject(&namespace, &bucket))
+        .await
+    {
+        Ok(store) => store,
+        Err(e) => {
+            dbg!(&e);
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("Bucket not found: {}", e)))
+                .unwrap();
+        }
+    };
+
+    match object_store.get(&file_path).await {
+        Ok(reader) => {
+            // let mut data = Vec::new();
+            // if let Err(e) = reader.read_to_end(&mut data).await {
+            //     dbg!(&e);
+            //     return axum::response::Response::builder()
+            //         .status(StatusCode::INTERNAL_SERVER_ERROR)
+            //         .body(Body::from(format!("Failed to read object: {}", e)))
+            //         .unwrap();
+            // }
+
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from_stream(ReaderStream::new(reader)))
+                .unwrap()
+        }
+        Err(e) => {
+            dbg!(&e);
+            return axum::response::Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from(format!("Object not found: {}", e)))
+                .unwrap();
+        }
+    }
 }
 
 async fn protected_handler(

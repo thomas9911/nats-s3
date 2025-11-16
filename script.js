@@ -1,4 +1,4 @@
-// import { S3Client } from "bun";
+import bun from "bun";
 import { S3Client, ListBucketsCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 
 const credentials = {
@@ -31,4 +31,15 @@ const command = new ListBucketsCommand({});
 // });
 
 const data = await client.send(command);
-console.log(data);
+// console.log(data);
+
+const bunClient = bun.S3Client(
+	{
+		bucket: "my-new-bucket",
+		...credentials
+	}
+)
+
+const file = bunClient.file("test.txt");
+
+console.log(await file.text());
